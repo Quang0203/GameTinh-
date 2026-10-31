@@ -421,7 +421,7 @@ const PEER_OPEN_TIMEOUT_MS=15000;
 const PEER_DATA_TIMEOUT_MS=20000;
 // Optional TURN relay credentials endpoint. Paste the Metered "Get TURN Credential" URL here.
 // The provider's credential-specific API key is intended for browser use; never put an account secret here.
-const TURN_CREDENTIALS_URL='';
+const TURN_CREDENTIALS_URL='https://cryptid-game-turn.quangkedo2003.workers.dev/ice';
 async function getPeerOptions(){
   if(!TURN_CREDENTIALS_URL) return {};
   const response=await fetch(TURN_CREDENTIALS_URL,{cache:'no-store'});
