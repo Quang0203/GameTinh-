@@ -417,6 +417,27 @@ function esc(s){ return String(s).replace(/</g,'&lt;') }
 // ---------- ONLINE (mã phòng, PeerJS) ----------
 function genCode(){ let chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<4;i++) s+=chars[rnd(chars.length)]; return s; }
 function ensurePeer(){ return new Promise((res,rej)=>{ if(window.Peer) return res(); let sc=document.createElement('script'); sc.src='https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js'; sc.onload=()=>res(); sc.onerror=()=>rej(new Error('peerjs')); document.head.appendChild(sc); }); }
+const PEER_OPEN_TIMEOUT_MS=15000;
+const PEER_DATA_TIMEOUT_MS=20000;
+// Optional TURN relay credentials endpoint. Paste the Metered "Get TURN Credential" URL here.
+// The provider's credential-specific API key is intended for browser use; never put an account secret here.
+const TURN_CREDENTIALS_URL='';
+async function getPeerOptions(){
+  if(!TURN_CREDENTIALS_URL) return {};
+  const response=await fetch(TURN_CREDENTIALS_URL,{cache:'no-store'});
+  if(!response.ok) throw new Error('turn-config');
+  const iceServers=await response.json();
+  if(!Array.isArray(iceServers)||!iceServers.length) throw new Error('turn-config');
+  return {config:{iceServers}};
+}
+function onlineErrorText(err){
+  let type=err && err.type ? err.type : 'unknown';
+  if(type==='network'||type==='server-error'||type==='socket-error') return `Không kết nối được máy chủ báo hiệu PeerJS (lỗi ${type}). Thử tải lại trang hoặc đổi mạng.`;
+  if(type==='peer-unavailable') return 'Không tìm thấy chủ phòng. Kiểm tra mã phòng mới nhất và để trang chủ phòng mở.';
+  if(type==='browser-incompatible') return 'Trình duyệt này không hỗ trợ WebRTC. Hãy thử Chrome hoặc Safari phiên bản mới.';
+  return `Kết nối online gặp lỗi (${type}). Hãy tạo phòng mới và thử lại.`;
+}
+function peerConnectTimeoutText(){ return 'Đã chờ quá lâu để kết nối. Phòng có thể không truy cập được qua mạng hiện tại; hãy thử lại hoặc dùng mạng khác.'; }
 function sortedConns(){ return NET? [...NET.conns].sort((a,b)=>a.playerIdx-b.playerIdx) : []; }
 function getReadyList(){
   if(!NET || !NET.isHost) return NET && NET.readyList ? NET.readyList : [];
@@ -465,7 +486,7 @@ function updateNetUI(){
     let names=[NET.hostName, ...sortedConns().map(c=>c.playerName||'Đang kết nối…')];
     el.innerHTML=`<b>Người trong phòng (${names.length}):</b> `+names.map(n=>`<span class="pill">${esc(n)}</span>`).join('');
     let st=document.getElementById('netStatus');
-    if(st && NET.code) st.innerHTML=`✅ Phòng đã tạo! Mã phòng: <b style="font-size:20px;letter-spacing:2px">${NET.code}</b> — gửi mã này cho bạn bè. Đang có ${names.length} người (cần tổng 2–5). Nút <b>Bắt đầu chơi online</b> ở khung vàng ngay dưới đây.`;
+    if(st && NET.code) st.innerHTML=NET.peerReady ? `✅ Phòng đã tạo! Mã phòng: <b style="font-size:20px;letter-spacing:2px">${NET.code}</b> — gửi mã này cho bạn bè. Đang có ${names.length} người (cần tổng 2–5). Nút <b>Bắt đầu chơi online</b> ở khung vàng ngay dưới đây.` : 'Đang kết nối tới máy chủ báo hiệu để đăng ký phòng…';
   } else if(NET && !NET.isHost){
     if(NET.readyList && NET.readyList.length){
       el.innerHTML=`<b>Người trong phòng:</b> `+NET.readyList.map(x=>`<span class="pill">${esc(x.name)} ${x.ready?'✅':'⏳'}</span>`).join('')+`<div class="small" style="margin-top:4px">Đang chờ chủ phòng bắt đầu…</div>`;
@@ -477,16 +498,23 @@ function updateNetUI(){
 async function createRoom(){
   let name=document.getElementById('myName').value.trim()||'Harper';
   let st=document.getElementById('netStatus'); if(st) st.textContent='Đang tạo phòng…';
-  try{ await ensurePeer(); }catch(e){ if(st) st.textContent='❌ Không tải được thư viện kết nối (cần internet). Hãy thử lại hoặc dùng chuyền tay.'; return; }
-  let code=genCode(); let peer=new Peer('cryptid-vn-'+code);
+  let peerOpts;
+  try{ await ensurePeer(); peerOpts=await getPeerOptions(); }catch(e){ if(st) st.textContent=e.message==='turn-config'?'❌ Không tải được cấu hình TURN. Kiểm tra đường dẫn TURN trong mã game.':'❌ Không tải được thư viện kết nối (cần internet). Hãy thử lại hoặc dùng chuyền tay.'; return; }
+  let code=genCode(); let peer=new Peer('cryptid-vn-'+code,peerOpts);
   NET={isHost:true, peer, conns:[], code, myIndex:0, hostName:name, hostReady:false};
-  peer.on('open', ()=>{ updateNetUI(); });
+  let signalingReady=false;
+  let hostOpenTimer=setTimeout(()=>{ if(!signalingReady && st) st.textContent=peerConnectTimeoutText(); },PEER_OPEN_TIMEOUT_MS);
+  peer.on('open', ()=>{ signalingReady=true; clearTimeout(hostOpenTimer); NET.peerReady=true; updateNetUI(); });
   peer.on('error', (err)=>{
     if(err.type==='unavailable-id'){ try{peer.destroy();}catch(e){} NET=null; createRoom(); }
-    else { let s2=document.getElementById('netStatus'); if(s2) s2.textContent='Lỗi kết nối: '+err.type; }
+    else { let s2=document.getElementById('netStatus'); if(s2) s2.textContent=onlineErrorText(err); }
   });
+  peer.on('disconnected', ()=>{ let s2=document.getElementById('netStatus'); if(s2) s2.textContent='Mất kết nối tới máy chủ báo hiệu PeerJS. Phòng có thể không nhận được người chơi mới.'; });
   peer.on('connection', (conn)=>{
+    let connectionTimer=setTimeout(()=>{ if(!conn.open){ let s=document.getElementById('netStatus'); if(s) s.textContent='Khách đang kết nối quá lâu. Hãy kiểm tra mạng hoặc thử lại bằng mã phòng mới.'; try{conn.close();}catch(e){} } },PEER_DATA_TIMEOUT_MS);
+    conn.on('error',(err)=>{ clearTimeout(connectionTimer); let s=document.getElementById('netStatus'); if(s) s.textContent=onlineErrorText(err); });
     conn.on('open', ()=>{
+      clearTimeout(connectionTimer);
       if(NET.conns.length>=4){ try{conn.send({type:'full'});}catch(e){} setTimeout(()=>{try{conn.close();}catch(e){}},500); return; }
       conn.playerIdx=NET.conns.length+1;
       // playerIdx must stay unique even if someone leaves: use max+1
@@ -500,18 +528,31 @@ async function createRoom(){
       conn.on('close', ()=>{ if(NET){ NET.conns=NET.conns.filter(c=>c!==conn); updateNetUI(); broadcastPlayerList(); broadcastReadyList(); playSfx('leave'); } });
     });
   });
-  updateNetUI();
+  if(st) st.textContent='Đang kết nối tới máy chủ báo hiệu để đăng ký phòng…';
 }
 async function joinRoom(){
   let codeEl=document.getElementById('joinCode'); let code=(codeEl?codeEl.value:'').trim().toUpperCase();
   let name=document.getElementById('myName').value.trim()||'Harper';
   if(!code){ alert('Nhập mã phòng trước.'); return; }
   let st=document.getElementById('netStatus'); if(st) st.textContent='Đang kết nối tới phòng '+code+'…';
-  try{ await ensurePeer(); }catch(e){ if(st) st.textContent='❌ Không tải được thư viện kết nối (cần internet).'; return; }
-  let peer=new Peer(); NET={isHost:false, peer, conns:[], code, myIndex:null, conn:null, myReady:false, readyList:null, lastJoinedList:null};
+  let peerOpts;
+  try{ await ensurePeer(); peerOpts=await getPeerOptions(); }catch(e){ if(st) st.textContent=e.message==='turn-config'?'❌ Không tải được cấu hình TURN. Kiểm tra đường dẫn TURN trong mã game.':'❌ Không tải được thư viện kết nối (cần internet).'; return; }
+  let peer=new Peer(undefined,peerOpts); NET={isHost:false, peer, conns:[], code, myIndex:null, conn:null, myReady:false, readyList:null, lastJoinedList:null};
+  let finished=false, peerOpenTimer, dataTimer;
+  function failJoin(message){
+    if(finished) return;
+    finished=true; clearTimeout(peerOpenTimer); clearTimeout(dataTimer);
+    if(st) st.textContent=message;
+    try{ if(NET && NET.peer===peer) peer.destroy(); }catch(e){}
+    if(NET && NET.peer===peer) NET=null;
+  }
+  peerOpenTimer=setTimeout(()=>failJoin(peerConnectTimeoutText()),PEER_OPEN_TIMEOUT_MS);
   peer.on('open', ()=>{
+    clearTimeout(peerOpenTimer);
+    if(finished) return;
     let conn=peer.connect('cryptid-vn-'+code, {reliable:true}); NET.conn=conn;
-    conn.on('open', ()=>{ try{conn.send({type:'join', name});}catch(e){} if(st) st.textContent='✅ Đã kết nối tới phòng '+code+', đang chờ chủ phòng bắt đầu ván (cần tổng 2–5 người).'; updateNetUI(); });
+    dataTimer=setTimeout(()=>failJoin(peerConnectTimeoutText()),PEER_DATA_TIMEOUT_MS);
+    conn.on('open', ()=>{ if(finished) return; finished=true; clearTimeout(dataTimer); try{conn.send({type:'join', name});}catch(e){} if(st) st.textContent='✅ Đã kết nối tới phòng '+code+', đang chờ chủ phòng bắt đầu ván (cần tổng 2–5 người).'; updateNetUI(); });
     conn.on('data', (data)=>{
       if(data.type==='init') applyInit(data);
       else if(data.type==='state') applyState(data.state);
@@ -530,9 +571,10 @@ async function joinRoom(){
       else if(data.type==='readyList'){ NET.readyList=data.players; let el2=document.getElementById('netPlayers'); if(el2) el2.innerHTML=`<b>Người trong phòng:</b> `+data.players.map(x=>`<span class="pill">${esc(x.name)} ${x.ready?'✅':'⏳'}</span>`).join(''); updateOnlineStartBar(); }
       else if(data.type==='full'){ alert('Phòng đã đủ 5 người.'); }
     });
-    conn.on('close', ()=>{ if(G && !G.over) alert('Mất kết nối với chủ phòng. Ván online đã dừng.'); });
+    conn.on('error', (err)=>failJoin(onlineErrorText(err)));
+    conn.on('close', ()=>{ if(!finished) failJoin('Kết nối tới phòng đã đóng trước khi hoàn tất. Kiểm tra chủ phòng và thử lại.'); else if(G && !G.over) alert('Mất kết nối với chủ phòng. Ván online đã dừng.'); });
   });
-  peer.on('error', (err)=>{ let s2=document.getElementById('netStatus'); if(s2) s2.textContent='Không kết nối được tới phòng '+code+' (mã sai hoặc chủ phòng chưa tạo / đã thoát). Lỗi: '+err.type; });
+  peer.on('error', (err)=>failJoin(onlineErrorText(err)));
 }
 function sendAct(msg){ if(NET && !NET.isHost && NET.conn && NET.conn.open){ try{ NET.conn.send({type:'act', ...msg}); }catch(e){} } }
 function onRemoteAct(conn, msg){
